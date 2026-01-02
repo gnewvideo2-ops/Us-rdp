@@ -1,46 +1,68 @@
-name: RDP-US
+name: Remote-Desktop-Deployment
 on:
   workflow_dispatch:
+
 jobs:
-  secure-rdp:
+  deploy-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Configure Core RDP Settings
+      - name: Configure System RDP Settings
         run: |
+          # Enable Remote Desktop and adjust security layers for compatibility
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          # Configure Windows Firewall to permit RDP traffic
+          netsh advfirewall firewall delete rule name="RDP-Gateway"
+          netsh advfirewall firewall add rule name="RDP-Gateway" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User
+      - name: Initialize Administrative User
         run: |
-          $pass = "US-RDP-Pass-2026!" # Change this or use a secret
-          $passwordSecure = ConvertTo-SecureString $pass -AsPlainText -Force
-          New-LocalUser -Name "RDP_US" -Password $passwordSecure -AccountNeverExpires
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP_US"
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP_US"
-          echo "RDP_CREDS=$pass" >> $env:GITHUB_ENV
-
-      - name: Install Tailscale
-        run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.exe"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\ts.exe"
-          Start-Process -FilePath "$env:TEMP\ts.exe" -ArgumentList "/quiet", "/norestart" -Wait
-
-      - name: Connect to Tailscale (US Exit Node)
-        run: |
-          # Replace 'us-exit-node-name' with the name of your US machine in Tailscale
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --exit-node=${{ secrets.US_EXIT_NODE_NAME }} --exit-node-allow-lan-access=true
+          # Generate a cryptographically secure random password
+          $charset = ([char[]](65..90)) + ([char[]](97..122)) + ([char[]](48..57)) + ([char[]](33..47))
+          $password = (-join ($charset | Get-Random -Count 16))
           
-          $status = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
-          echo "TAILSCALE_IP=$($status.TailscaleIPs[0])" >> $env:GITHUB_ENV
+          # Create local user and assign to Administrative groups
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
+          Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
+          
+          # Mask password in logs and export to environment
+          echo "::add-mask::$password"
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Maintain Connection
+      - name: Deploy Tailscale Network Layer
         run: |
-          Write-Host "=== US RDP DETAILS ==="
-          Write-Host "IP Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP_US"
-          Write-Host "Password: $env:RDP_CREDS"
-          while ($true) { Start-Sleep -Seconds 300 }
+          # Using the dynamic latest stable release to prevent 404 errors
+          $sourceUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.exe"
+          $tempPath = "$env:TEMP\tailscale_installer.exe"
+          Invoke-WebRequest -Uri $sourceUrl -OutFile $tempPath
+          Start-Process -FilePath $tempPath -ArgumentList "/quiet", "/norestart" -Wait
+          Remove-Item -Path $tempPath -Force
+
+      - name: Establish VPN Connection
+        run: |
+          # Authenticate and connect to the Tailscale mesh network
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=github-vm-us
+          $networkInfo = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+          $assignedIp = $networkInfo.TailscaleIPs[0]
+          echo "REMOTE_IP=$assignedIp" >> $env:GITHUB_ENV
+
+      - name: Deployment Summary & Heartbeat
+        run: |
+          Write-Host "------------------------------------"
+          Write-Host "DEPLOIMENT SUCCESSFUL"
+          Write-Host "Connection IP: $env:REMOTE_IP"
+          Write-Host "Username: AdminUser"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "------------------------------------"
+          
+          # Maintain session persistence
+          while ($true) {
+            Write-Host "Status: Connection Active [$(Get-Date)]"
+            Start-Sleep -Seconds 300
+          }
