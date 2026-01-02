@@ -1,0 +1,46 @@
+name: RDP-US
+on:
+  workflow_dispatch:
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User
+        run: |
+          $pass = "US-RDP-Pass-2026!" # Change this or use a secret
+          $passwordSecure = ConvertTo-SecureString $pass -AsPlainText -Force
+          New-LocalUser -Name "RDP_US" -Password $passwordSecure -AccountNeverExpires
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP_US"
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP_US"
+          echo "RDP_CREDS=$pass" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\ts.exe"
+          Start-Process -FilePath "$env:TEMP\ts.exe" -ArgumentList "/quiet", "/norestart" -Wait
+
+      - name: Connect to Tailscale (US Exit Node)
+        run: |
+          # Replace 'us-exit-node-name' with the name of your US machine in Tailscale
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --exit-node=${{ secrets.US_EXIT_NODE_NAME }} --exit-node-allow-lan-access=true
+          
+          $status = & "C:\Program Files\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+          echo "TAILSCALE_IP=$($status.TailscaleIPs[0])" >> $env:GITHUB_ENV
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "=== US RDP DETAILS ==="
+          Write-Host "IP Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP_US"
+          Write-Host "Password: $env:RDP_CREDS"
+          while ($true) { Start-Sleep -Seconds 300 }
